@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>fastapi-streaming-chat</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; }
+  h1 { font-size: 1.25rem; }
+  #meta { font-size: 12px; opacity: .6; margin-bottom: 8px; }
+  #log { border: 1px solid #8883; border-radius: 8px; padding: 16px; min-height: 320px;
+         margin-bottom: 16px; white-space: pre-wrap; overflow-y: auto; max-height: 60vh; }
+  .msg { margin-bottom: 12px; }
+  .role { font-weight: 600; opacity: .7; font-size: 12px; text-transform: uppercase; }
+  form { display: flex; gap: 8px; }
+  input[type=text] { flex: 1; padding: 10px 12px; border-radius: 6px; border: 1px solid #8886; font-size: 14px; }
+  button { padding: 10px 16px; border-radius: 6px; border: 0; background: #4f46e5; color: white; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+</style>
+</head>
+<body>
+  <h1>fastapi-streaming-chat</h1>
+  <div id="meta">session: <span id="session-id">new</span> &middot; <span id="cache-badge"></span></div>
+  <div id="log"></div>
+  <form id="chat-form">
+    <input id="message" type="text" placeholder="Ask something..." autocomplete="off" />
+    <button id="send" type="submit">Send</button>
+  </form>
+
+<script>
+const logEl = document.getElementById("log");
+const formEl = document.getElementById("chat-form");
+const inputEl = document.getElementById("message");
+const sendEl = document.getElementById("send");
+const sessionIdEl = document.getElementById("session-id");
+const cacheBadgeEl = document.getElementById("cache-badge");
+
+// Kept only for local demo convenience - not a security mechanism.
+let sessionId = localStorage.getItem("session_id");
+if (sessionId) sessionIdEl.textContent = sessionId;
+
+function addMessage(role) {
+  const wrap = document.createElement("div");
+  wrap.className = "msg";
+  const roleEl = document.createElement("div");
+  roleEl.className = "role";
+  roleEl.textContent = role;
+  const bodyEl = document.createElement("div");
+  wrap.appendChild(roleEl);
+  wrap.appendChild(bodyEl);
+  logEl.appendChild(wrap);
+  logEl.scrollTop = logEl.scrollHeight;
+  return bodyEl;
+}
+
+// Minimal SSE parser for `fetch` + ReadableStream. We can't use the
+// browser's built-in EventSource here because it only supports GET, and
+// this endpoint is a POST.
+function parseSSEBuffer(buffer, onEvent) {
+  const parts = buffer.split("\n\n");
+  const remainder = parts.pop();
+  for (const part of parts) {
+    let event = "message";
+    let data = "";
+    for (const line of part.split("\n")) {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) data += line.slice(5).trim();
+    }
+    if (data) onEvent(event, data);
+  }
+  return remainder;
+}
+
+formEl.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const message = inputEl.value.trim();
+  if (!message) return;
+
+  inputEl.value = "";
+  sendEl.disabled = true;
+  cacheBadgeEl.textContent = "";
+  addMessage("you").textContent = message;
+  const assistantEl = addMessage("assistant");
+
+  try {
+    const res = await fetch("/api/v1/chat/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId, message }),
+    });
+
+    if (!res.ok || !res.body) {
+      assistantEl.textContent = `[request failed: ${res.status}]`;
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      buffer = parseSSEBuffer(buffer, (event, data) => {
+        const payload = JSON.parse(data);
+        if (event === "session") {
+          sessionId = payload.session_id;
+          localStorage.setItem("session_id", sessionId);
+          sessionIdEl.textContent = sessionId;
+        } else if (event === "chunk") {
+          assistantEl.textContent += payload.content;
+          logEl.scrollTop = logEl.scrollHeight;
+        } else if (event === "done") {
+          cacheBadgeEl.textContent = payload.cached ? "served from cache" : "";
+        } else if (event === "error") {
+          assistantEl.textContent += `\n[error: ${payload.message}]`;
+        }
+      });
+    }
+  } catch (err) {
+    assistantEl.textContent += `\n[network error: ${err}]`;
+  } finally {
+    sendEl.disabled = false;
+    inputEl.focus();
+  }
+});
+</script>
+</body>
+</html>
