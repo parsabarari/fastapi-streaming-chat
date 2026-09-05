@@ -102,7 +102,7 @@ formEl.addEventListener("submit", async (e) => {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
       buffer = parseSSEBuffer(buffer, (event, data) => {
         const payload = JSON.parse(data);
         if (event === "session") {
